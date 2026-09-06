@@ -60,6 +60,9 @@ function resellerinterface_resolveExpiry($client, string $domain, array $details
                 'sld' => $sld,
                 'tld' => $tld,
             ],
+            'sort' => [
+                'nextBillingDate' => 'ASC',
+            ],
             'limit' => 5,
         ]);
         foreach ((array) ($listed['list'] ?? []) as $item) {
@@ -77,12 +80,16 @@ function resellerinterface_resolveExpiry($client, string $domain, array $details
 
     try {
         $renewals = $client->request('billing/listForRenewal', [
-            'days' => 400,
-            'search' => $domain,
+            'days' => 800,
+            'search' => [
+                'text' => $domain,
+                'productGroup' => 'domain',
+            ],
             'limit' => 20,
         ]);
         foreach ((array) ($renewals['list'] ?? []) as $item) {
-            if (strcasecmp((string) ($item['name'] ?? ''), $domain) !== 0) {
+            $name = (string) ($item['name'] ?? $item['domain'] ?? '');
+            if ($name !== '' && strcasecmp($name, $domain) !== 0) {
                 continue;
             }
             $fromBilling = DomainHelper::extractExpiryDate($item);
@@ -151,6 +158,201 @@ function resellerinterface_domainDetails($client, string $domain): array
     }
 
     return $details;
+}
+
+/**
+ * Bei internem DNS (mainns / vNS) fehlt nameserver oft in domain/details.
+ *
+ * @param \WHMCS\Module\Registrar\Resellerinterface\CoreApiClient $client
+ * @param string $domain
+ * @param array $details
+ * @return array<int, string>
+ */
+function resellerinterface_resolveNameservers($client, string $domain, array $details = []): array
+{
+    $nameservers = DomainHelper::extractNameservers($details);
+    if ($nameservers !== []) {
+        return $nameservers;
+    }
+
+    $mode = DomainHelper::nameserverMode($details);
+
+    if ($mode !== 'INTERNAL') {
+        $parts = explode('.', $domain);
+        $tld = (string) array_pop($parts);
+        $sld = implode('.', $parts);
+
+        try {
+            $listed = $client->request('domain/list', [
+                'filter' => [
+                    'sld' => $sld,
+                    'tld' => $tld,
+                ],
+                'include' => ['nameserver'],
+                'limit' => 5,
+            ]);
+            foreach ((array) ($listed['list'] ?? []) as $item) {
+                if (!is_array($item) || strcasecmp((string) ($item['domain'] ?? ''), $domain) !== 0) {
+                    continue;
+                }
+                $nameservers = DomainHelper::extractNameservers($item);
+                if ($mode === '') {
+                    $mode = DomainHelper::nameserverMode($item);
+                }
+                break;
+            }
+        } catch (Exception $e) {
+            // Zone / vNS als Fallback
+        }
+    }
+
+    if ($nameservers !== []) {
+        return $nameservers;
+    }
+
+    try {
+        $fromZone = DomainHelper::extractNameserversFromZone(
+            $client->request('dns/getZoneDetails', ['domain' => $domain])
+        );
+        if ($fromZone !== []) {
+            return $fromZone;
+        }
+    } catch (Exception $e) {
+        // Keine Zone oder kein DNS-Recht
+    }
+
+    try {
+        $fromVns = resellerinterface_defaultVnsHostnames($client);
+        if ($fromVns !== []) {
+            return $fromVns;
+        }
+    } catch (Exception $e) {
+        // vNS-Liste optional
+    }
+
+    return DomainHelper::INTERNAL_NAMESERVERS;
+}
+
+/**
+ * @param \WHMCS\Module\Registrar\Resellerinterface\CoreApiClient $client
+ * @return array<int, string>
+ */
+function resellerinterface_defaultVnsHostnames($client): array
+{
+    $response = $client->request('vns/list');
+    $preferredIds = array_values(array_filter([
+        (int) ($response['default'] ?? 0),
+        (int) ($response['fallback'] ?? 0),
+    ]));
+
+    foreach ((array) ($response['list'] ?? []) as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        $id = (int) ($item['vnsID'] ?? 0);
+        if ($preferredIds !== [] && !in_array($id, $preferredIds, true)) {
+            continue;
+        }
+        $hosts = DomainHelper::normalizeNsSet((array) ($item['hostname'] ?? []));
+        if ($hosts !== []) {
+            return $hosts;
+        }
+    }
+
+    foreach ((array) ($response['list'] ?? []) as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        $hosts = DomainHelper::normalizeNsSet((array) ($item['hostname'] ?? []));
+        if ($hosts !== []) {
+            return $hosts;
+        }
+    }
+
+    return [];
+}
+
+/**
+ * @param \WHMCS\Module\Registrar\Resellerinterface\CoreApiClient $client
+ * @param array<int, string> $hostnames
+ * @return array{0: bool, 1: int|null}
+ */
+function resellerinterface_internalNsTarget($client, array $hostnames): array
+{
+    $normalized = DomainHelper::normalizeNsSet($hostnames);
+    $sets = [];
+    $response = [];
+
+    try {
+        $response = $client->request('vns/list');
+        foreach ((array) ($response['list'] ?? []) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $hosts = DomainHelper::normalizeNsSet((array) ($item['hostname'] ?? []));
+            if ($hosts !== []) {
+                $sets[] = $hosts;
+            }
+        }
+    } catch (Exception $e) {
+        // mainns-Fallback ohne vNS-Liste
+    }
+
+    if (!DomainHelper::isInternalNameserverSet($normalized, $sets)) {
+        return [false, null];
+    }
+
+    foreach ((array) ($response['list'] ?? []) as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        $hosts = DomainHelper::normalizeNsSet((array) ($item['hostname'] ?? []));
+        if ($hosts === [] || array_diff($normalized, $hosts) !== []) {
+            continue;
+        }
+        $id = (int) ($item['vnsID'] ?? 0);
+        if ($id > 0) {
+            return [true, $id];
+        }
+    }
+
+    $fallback = (int) ($response['fallback'] ?? 0);
+    if ($fallback > 0) {
+        return [true, $fallback];
+    }
+
+    $default = (int) ($response['default'] ?? 0);
+
+    return [true, $default > 0 ? $default : null];
+}
+
+/**
+ * Interne mainns/vNS nicht als redirectMode=external bestellen, sonst bricht die DNS-Verwaltung.
+ *
+ * @param array $params
+ * @param array $payload
+ * @param array $nameservers
+ * @return array
+ */
+function resellerinterface_applyOrderNameservers(array $params, array $payload, array $nameservers): array
+{
+    $hostnames = DomainHelper::hostnamesFromNsPayload($nameservers);
+    $defaultMode = (string) ($params['DefaultRedirectMode'] ?? 'external');
+
+    if ($hostnames === []) {
+        $payload['redirectMode'] = $defaultMode;
+        return $payload;
+    }
+
+    if (DomainHelper::isInternalNameserverSet($hostnames)) {
+        $payload['redirectMode'] = $defaultMode === 'external' ? 'unconfigured' : $defaultMode;
+        return $payload;
+    }
+
+    $payload['redirectMode'] = 'external';
+    $payload['nameserver'] = $nameservers;
+
+    return $payload;
 }
 
 /**
@@ -291,13 +493,7 @@ function resellerinterface_RegisterDomain(array $params): array
             'handles' => $handles->buildHandlesForOrder($params),
             'fullyAsync' => false,
         ];
-
-        if ($nameservers !== []) {
-            $payload['redirectMode'] = 'external';
-            $payload['nameserver'] = $nameservers;
-        } else {
-            $payload['redirectMode'] = $params['DefaultRedirectMode'] ?? 'external';
-        }
+        $payload = resellerinterface_applyOrderNameservers($params, $payload, $nameservers);
 
         if (!empty($params['idprotection'])) {
             $payload['whoisPrivacy'] = true;
@@ -338,13 +534,7 @@ function resellerinterface_TransferDomain(array $params): array
             'authcode' => (string) ($params['eppcode'] ?? ''),
             'fullyAsync' => false,
         ];
-
-        if ($nameservers !== []) {
-            $payload['redirectMode'] = 'external';
-            $payload['nameserver'] = $nameservers;
-        } else {
-            $payload['redirectMode'] = $params['DefaultRedirectMode'] ?? 'external';
-        }
+        $payload = resellerinterface_applyOrderNameservers($params, $payload, $nameservers);
 
         if (!empty($params['idprotection'])) {
             $payload['whoisPrivacy'] = true;
@@ -395,17 +585,17 @@ function resellerinterface_GetNameservers(array $params): array
     try {
         $client = resellerinterface_client($params);
         $domain = DomainHelper::getDomainName($params);
-        $response = $client->request('domain/details', ['domain' => $domain]);
-        $nameservers = DomainHelper::extractNameservers($response['domain'] ?? []);
-
-        $result = [];
-        for ($i = 0; $i < 5; $i++) {
-            $result['ns' . ($i + 1)] = $nameservers[$i] ?? '';
+        $details = [];
+        try {
+            $details = resellerinterface_domainDetails($client, $domain);
+        } catch (Exception $e) {
+            $details = [];
         }
+        $nameservers = resellerinterface_resolveNameservers($client, $domain, $details);
 
-        return $result;
+        return DomainHelper::toWhmcsNsFields($nameservers);
     } catch (Exception $e) {
-        return ['error' => $e->getMessage()];
+        return DomainHelper::toWhmcsNsFields(DomainHelper::INTERNAL_NAMESERVERS);
     }
 }
 
@@ -419,9 +609,23 @@ function resellerinterface_SaveNameservers(array $params): array
         $client = resellerinterface_client($params);
         $domain = DomainHelper::getDomainName($params);
         $nameservers = DomainHelper::buildNameserverPayload($params);
+        $hostnames = DomainHelper::hostnamesFromNsPayload($nameservers);
 
-        if ($nameservers === []) {
+        if ($hostnames === []) {
             throw new Exception('Mindestens ein Nameserver muss angegeben werden.');
+        }
+
+        [$isInternal, $vnsId] = resellerinterface_internalNsTarget($client, $hostnames);
+        if ($isInternal) {
+            if ($vnsId) {
+                $client->request('dns/setVNS', [
+                    'domain' => $domain,
+                    'vnsID' => $vnsId,
+                    'forceDomainUpdate' => true,
+                ]);
+            }
+
+            return ['success' => true];
         }
 
         $client->request('domain/setNameserver', [
@@ -445,7 +649,10 @@ function resellerinterface_GetDomainInformation(array $params)
         $client = resellerinterface_client($params);
         $domain = DomainHelper::getDomainName($params);
         $details = resellerinterface_domainDetails($client, $domain);
-        $nameservers = DomainHelper::extractNameservers($details);
+        $nameservers = resellerinterface_resolveNameservers($client, $domain, $details);
+        if ($nameservers === []) {
+            $nameservers = DomainHelper::INTERNAL_NAMESERVERS;
+        }
 
         $status = Domain::STATUS_ACTIVE;
         $state = strtoupper((string) ($details['state'] ?? ''));
@@ -458,8 +665,12 @@ function resellerinterface_GetDomainInformation(array $params)
 
         $domainObj = (new Domain())
             ->setDomain($domain)
-            ->setNameservers($nameservers)
+            ->setNameservers(DomainHelper::toWhmcsNsFields($nameservers))
             ->setRegistrationStatus($status);
+
+        if (method_exists($domainObj, 'setDnsManagementStatus')) {
+            $domainObj->setDnsManagementStatus(true);
+        }
 
         $lock = DomainHelper::extractTransferLock($details);
         $domainObj->setTransferLock($lock === true);
@@ -681,7 +892,7 @@ function resellerinterface_SaveDNS(array $params): array
     try {
         $client = resellerinterface_client($params);
         $domain = DomainHelper::getDomainName($params);
-        $records = DomainHelper::mapDnsRecordsForApi((array) ($params['dnsrecords'] ?? []));
+        $records = DomainHelper::mapDnsRecordsForApi((array) ($params['dnsrecords'] ?? []), $domain);
 
         $client->request('dns/setRecords', [
             'domain' => $domain,
@@ -726,20 +937,32 @@ function resellerinterface_GetEPPCode(array $params): array
     try {
         $client = resellerinterface_client($params);
         $domain = DomainHelper::getDomainName($params);
+        $response = [];
 
-        $response = $client->request('domain/showAuthcode', [
-            'domain' => $domain,
-        ]);
+        try {
+            $response = $client->request('domain/showAuthcode', [
+                'domain' => $domain,
+            ]);
+        } catch (Exception $e) {
+            if (!resellerinterface_isMissingAuthcode($e)) {
+                throw $e;
+            }
+        }
 
         if (empty($response['authcode'])) {
             $response = $client->request('domain/generateAuthcode', [
                 'domain' => $domain,
-                'waitForResponse' => true,
+                'expireDays' => 30,
+                'waitForResponse' => 1,
             ]);
         }
 
         if (empty($response['authcode'])) {
-            throw new Exception('Authcode konnte nicht abgerufen werden.');
+            return [
+                'eppcode' => '',
+                'error' => 'Der Authcode wurde angefordert und wird von der Registry erzeugt. '
+                    . 'Bitte die Seite in wenigen Sekunden neu laden.',
+            ];
         }
 
         return [
@@ -748,6 +971,18 @@ function resellerinterface_GetEPPCode(array $params): array
     } catch (Exception $e) {
         return ['error' => $e->getMessage()];
     }
+}
+
+/**
+ * @param Exception $e
+ * @return bool
+ */
+function resellerinterface_isMissingAuthcode(Exception $e): bool
+{
+    $message = $e->getMessage();
+
+    return str_contains($message, '[2002]')
+        || str_contains($message, 'NOT_EXISTS');
 }
 
 /**

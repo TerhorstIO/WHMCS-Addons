@@ -47,7 +47,7 @@ Auf der Konfigurationsseite gibt es den Button **Verbindung testen**. Der Test l
 | Registrierung | `domain/create` |
 | Transfer | `domain/transfer` |
 | Verlängerung | `domain/renew` |
-| Nameserver lesen / speichern | `domain/details`, `domain/setNameserver` |
+| Nameserver lesen / speichern | intern: `dns/getZoneDetails` / `vns/list` (mainns), extern: `domain/setNameserver` |
 | Child-Nameserver (Glue) | `domain/listHostObjects`, `domain/setHostObjects` |
 | DNS-Records | `dns/listRecords`, `dns/setRecords` |
 | Kontakte (WHOIS) | `handle/create`, `handle/details`, `domain/setHandles` |
