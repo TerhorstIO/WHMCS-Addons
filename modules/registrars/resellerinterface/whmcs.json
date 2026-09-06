@@ -2,7 +2,7 @@
     "schema": "1.0",
     "type": "whmcs-registrars",
     "name": "resellerinterface",
-    "license": "proprietary",
+    "license": "mit",
     "category": "domains",
     "description": {
         "name": "ResellerInterface CoreAPI",
@@ -11,8 +11,8 @@
     },
     "authors": [
         {
-            "name": "Custom Development",
-            "email": ""
+            "name": "Niklas Terhorst",
+            "email": "niklas@terhorst.io"
         }
     ]
 }

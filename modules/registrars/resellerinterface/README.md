@@ -83,3 +83,7 @@ WHMCS hat im Kunden-Tab **Domains** keinen reinen „Domain hinzufügen“-Butto
 4. Registrar auf **ResellerInterface CoreAPI** setzen, Status **Active**.
 
 Danach funktionieren Nameserver, Kontakte und DNS über das Modul, weil die Domain bei ResellerInterface schon existiert.
+
+## Lizenz
+
+Dieses Addon steht unter der [MIT-Lizenz](../../LICENSE.md) der WHMCS-Addon-Sammlung. Copyright und namentliche Nennung aller Helfer: [AUTHORS.md](../../AUTHORS.md). Das ResellerInterface-Logo ist eine Marke von Domain Offensive und nicht Bestandteil der Lizenz.
