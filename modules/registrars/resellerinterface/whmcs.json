@@ -6,8 +6,8 @@
     "category": "domains",
     "description": {
         "name": "ResellerInterface CoreAPI",
-        "tagline": "Domain-Registrierung über die ResellerInterface CoreAPI",
-        "long": "WHMCS Registrar-Modul für Domain-Registrierung, Transfer, Verlängerung, Nameserver-, DNS- und Kontaktverwaltung über die ResellerInterface CoreAPI."
+        "tagline": "Domain-Registrierung über resellerinterface.de (do.de / Domain Offensive)",
+        "long": "WHMCS Registrar-Modul für Domain-Registrierung, Transfer, Verlängerung, Nameserver-, DNS- und Kontaktverwaltung über die ResellerInterface CoreAPI von do.de / Domain Offensive."
     },
     "authors": [
         {
