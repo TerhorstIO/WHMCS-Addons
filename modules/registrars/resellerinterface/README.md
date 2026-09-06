@@ -1,5 +1,7 @@
 # ResellerInterface (CoreAPI)
 
+![ResellerInterface](logo.png)
+
 WHMCS Domain-Registrar für die [ResellerInterface CoreAPI](https://core.resellerinterface.de/api) von [do.de](https://www.do.de) / Domain Offensive.
 
 **Installationsziel:** `WHMCS_ROOT/modules/registrars/resellerinterface/`

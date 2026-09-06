@@ -6,6 +6,8 @@ Jedes Addon liegt im üblichen WHMCS-Pfad (`modules/…`). Den jeweiligen Ordner
 
 ## Addons
 
+[![ResellerInterface](modules/registrars/resellerinterface/logo.png)](modules/registrars/resellerinterface/README.md)
+
 | Addon | Typ | Beschreibung |
 | --- | --- | --- |
 | [ResellerInterface (CoreAPI)](modules/registrars/resellerinterface/README.md) | Domain Registrar | Domains über [resellerinterface.de](https://www.resellerinterface.de) von do.de / Domain Offensive in WHMCS verwalten: Registrierung, Transfer, Verlängerung, Nameserver, DNS, Kontakte und Sync. |
