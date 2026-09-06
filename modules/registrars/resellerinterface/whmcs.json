@@ -1,0 +1,18 @@
+{
+    "schema": "1.0",
+    "type": "whmcs-registrars",
+    "name": "resellerinterface",
+    "license": "proprietary",
+    "category": "domains",
+    "description": {
+        "name": "ResellerInterface CoreAPI",
+        "tagline": "Domain-Registrierung über die ResellerInterface CoreAPI",
+        "long": "WHMCS Registrar-Modul für Domain-Registrierung, Transfer, Verlängerung, Nameserver-, DNS- und Kontaktverwaltung über die ResellerInterface CoreAPI."
+    },
+    "authors": [
+        {
+            "name": "Custom Development",
+            "email": ""
+        }
+    ]
+}
