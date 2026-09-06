@@ -6,8 +6,6 @@ namespace WHMCS\Module\Registrar\Resellerinterface;
 
 use WHMCS\Database\Capsule;
 
-require_once __DIR__ . '/CoreApiClient.php';
-
 /**
  * Loads registrar module settings for hooks and admin actions.
  */
@@ -60,8 +58,6 @@ class ModuleConfig
             'Username',
             'Password',
             'TotpCode',
-            'ApiUrl',
-            'ApiPrefix',
             'ResellerId',
             'DefaultHandleTag',
             'DefaultRedirectMode',
@@ -79,20 +75,39 @@ class ModuleConfig
             }
         }
 
-        if (isset($fields['ApiUrl']) && !CoreApiClient::isAllowedApiHost((string) $fields['ApiUrl'])) {
-            unset($fields['ApiUrl']);
-        }
-
         foreach ($fields as $key => $value) {
-            if ($key === 'Password' && $value === '' && !empty($params['Password'])) {
-                continue;
-            }
-            if ($key === 'TotpCode' && $value === '' && !empty($params['TotpCode'])) {
+            if (self::shouldKeepStoredSecret($key, $value, $params)) {
                 continue;
             }
             $params[$key] = $value;
         }
 
         return $params;
+    }
+
+    /**
+     * After save, WHMCS password inputs are empty or show placeholders.
+     *
+     * @param string $key
+     * @param mixed $value
+     * @param array $params
+     * @return bool
+     */
+    private static function shouldKeepStoredSecret(string $key, $value, array $params): bool
+    {
+        if (!in_array($key, ['Password', 'TotpCode'], true)) {
+            return false;
+        }
+
+        if (empty($params[$key])) {
+            return false;
+        }
+
+        $raw = trim((string) $value);
+        if ($raw === '') {
+            return true;
+        }
+
+        return (bool) preg_match('/^[\.●•*]+$/', $raw);
     }
 }

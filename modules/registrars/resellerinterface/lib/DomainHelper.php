@@ -149,6 +149,52 @@ class DomainHelper
     }
 
     /**
+     * CoreAPI hat in domain/details kein expireDate.
+     * Mögliche Quellen: nextBillingDate (List/Sort), expireDate (billing/listForRenewal),
+     * cancellationDate (nur bei Kündigung).
+     *
+     * @param array $source
+     * @return string|null Y-m-d
+     */
+    public static function extractExpiryDate(array $source): ?string
+    {
+        foreach (['expireDate', 'nextBillingDate', 'nextPaymentDate'] as $field) {
+            $parsed = self::normalizeDate($source[$field] ?? null);
+            if ($parsed) {
+                return $parsed;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param mixed $value
+     * @return string|null Y-m-d
+     */
+    public static function normalizeDate($value): ?string
+    {
+        if ($value === null || $value === '' || $value === false) {
+            return null;
+        }
+
+        if (is_numeric($value) && (int) $value > 1000000000) {
+            return gmdate('Y-m-d', (int) $value);
+        }
+
+        $raw = trim((string) $value);
+        if (preg_match('/^(\d{2})\.(\d{2})\.(\d{4})$/', $raw, $m)) {
+            return $m[3] . '-' . $m[2] . '-' . $m[1];
+        }
+
+        if (preg_match('/^\d{4}-\d{2}-\d{2}/', $raw)) {
+            return substr($raw, 0, 10);
+        }
+
+        return null;
+    }
+
+    /**
      * @param array $domainDetails
      * @return bool|null
      */

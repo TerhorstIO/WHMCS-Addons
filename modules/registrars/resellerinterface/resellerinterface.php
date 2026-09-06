@@ -16,6 +16,7 @@ require_once __DIR__ . '/lib/CoreApiClient.php';
 require_once __DIR__ . '/lib/DomainHelper.php';
 require_once __DIR__ . '/lib/HandleManager.php';
 require_once __DIR__ . '/lib/ModuleConfig.php';
+require_once __DIR__ . '/lib/TldPricing.php';
 
 /**
  * @param array $params
@@ -33,6 +34,67 @@ function resellerinterface_client(array $params): CoreApiClient
 function resellerinterface_handles(array $params): HandleManager
 {
     return new HandleManager(resellerinterface_client($params), $params);
+}
+
+/**
+ * Ablaufdatum aus Domain-Objekt oder billing/listForRenewal.
+ *
+ * @param \WHMCS\Module\Registrar\Resellerinterface\CoreApiClient $client
+ * @param string $domain
+ * @param array $details
+ * @return string|null Y-m-d
+ */
+function resellerinterface_resolveExpiry($client, string $domain, array $details): ?string
+{
+    $direct = DomainHelper::extractExpiryDate($details);
+    if ($direct) {
+        return $direct;
+    }
+
+    try {
+        $parts = explode('.', $domain);
+        $tld = (string) array_pop($parts);
+        $sld = implode('.', $parts);
+        $listed = $client->request('domain/list', [
+            'filter' => [
+                'sld' => $sld,
+                'tld' => $tld,
+            ],
+            'limit' => 5,
+        ]);
+        foreach ((array) ($listed['list'] ?? []) as $item) {
+            if (strcasecmp((string) ($item['domain'] ?? ''), $domain) !== 0) {
+                continue;
+            }
+            $fromList = DomainHelper::extractExpiryDate($item);
+            if ($fromList) {
+                return $fromList;
+            }
+        }
+    } catch (Exception $e) {
+        // Continue with billing lookup.
+    }
+
+    try {
+        $renewals = $client->request('billing/listForRenewal', [
+            'days' => 400,
+            'search' => $domain,
+            'limit' => 20,
+        ]);
+        foreach ((array) ($renewals['list'] ?? []) as $item) {
+            if (strcasecmp((string) ($item['name'] ?? ''), $domain) !== 0) {
+                continue;
+            }
+            $fromBilling = DomainHelper::extractExpiryDate($item);
+            if ($fromBilling) {
+                return $fromBilling;
+            }
+        }
+    } catch (Exception $e) {
+        // No expiry available.
+    }
+
+    return null;
 }
 
 /**
@@ -67,7 +129,7 @@ function resellerinterface_getConfigArray(): array
             'FriendlyName' => 'API-Benutzername',
             'Type' => 'text',
             'Size' => '40',
-            'Description' => 'Benutzername für /stable/reseller/login',
+            'Description' => '<span id="ri-config-root"></span>Benutzername für /stable/reseller/login',
         ],
         'Password' => [
             'FriendlyName' => 'API-Passwort',
@@ -79,20 +141,6 @@ function resellerinterface_getConfigArray(): array
             'Type' => 'password',
             'Size' => '10',
             'Description' => 'Nur ausfüllen, wenn 2FA per TOTP aktiviert ist. Alternativ temporär für Login.',
-        ],
-        'ApiUrl' => [
-            'FriendlyName' => 'API-URL',
-            'Type' => 'text',
-            'Size' => '60',
-            'Default' => 'https://core.resellerinterface.de',
-            'Description' => 'Basis-URL ohne /stable',
-        ],
-        'ApiPrefix' => [
-            'FriendlyName' => 'API-Version',
-            'Type' => 'text',
-            'Size' => '20',
-            'Default' => 'stable',
-            'Description' => 'Pfadpräfix, standardmäßig stable → /stable/reseller/login',
         ],
         'ResellerId' => [
             'FriendlyName' => 'Reseller-ID',
@@ -116,6 +164,16 @@ function resellerinterface_getConfigArray(): array
             ],
             'Default' => 'external',
             'Description' => 'Verwendet bei Registrierung/Transfer, wenn keine Nameserver gesetzt sind',
+        ],
+        'AutoDnssec' => [
+            'FriendlyName' => 'Auto-DNSSEC',
+            'Type' => 'yesno',
+            'Description' => 'Bei Registrierung/Transfer autoDnssec setzen (interne Nameserver)',
+        ],
+        'UseTrustee' => [
+            'FriendlyName' => 'Trustee standardmäßig',
+            'Type' => 'yesno',
+            'Description' => 'Bei Registrierung/Transfer einen Trustee mitbestellen',
         ],
         'DebugMode' => [
             'FriendlyName' => 'Debug-Modus',
@@ -145,8 +203,9 @@ function resellerinterface_getConfigArray(): array
  */
 function resellerinterface_TestConnection(array $params): array
 {
+    $client = resellerinterface_client($params);
+
     try {
-        $client = resellerinterface_client($params);
         $client->testConnection();
 
         return [
@@ -196,6 +255,7 @@ function resellerinterface_RegisterDomain(array $params): array
             $payload['premiumOK'] = true;
         }
 
+        $payload = resellerinterface_applyOrderOptions($params, $payload);
         $client->request('domain/create', $payload);
 
         return ['success' => true];
@@ -238,6 +298,7 @@ function resellerinterface_TransferDomain(array $params): array
             $payload['resellerID'] = (int) $params['ResellerId'];
         }
 
+        $payload = resellerinterface_applyOrderOptions($params, $payload);
         $client->request('domain/transfer', $payload);
 
         return ['success' => true];
@@ -350,9 +411,10 @@ function resellerinterface_GetDomainInformation(array $params)
             $domainObj->setTransferLock($lock);
         }
 
-        if (!empty($details['cancellationDate'])) {
+        $expiry = resellerinterface_resolveExpiry($client, $domain, $details);
+        if ($expiry) {
             try {
-                $domainObj->setExpiryDate(Carbon::parse($details['cancellationDate']));
+                $domainObj->setExpiryDate(Carbon::createFromFormat('Y-m-d', $expiry));
             } catch (Exception $e) {
                 // Ignore invalid date formats from API.
             }
@@ -398,6 +460,19 @@ function resellerinterface_SaveContactDetails(array $params): array
         }
 
         $handles->saveContactDetails($domain, $contactDetails);
+
+        if (!empty($contactDetails['Registrant'])) {
+            try {
+                $client = resellerinterface_client($params);
+                $client->request('domain/update', [
+                    'domain' => $domain,
+                    'tradeOK' => true,
+                    'fullyAsync' => false,
+                ]);
+            } catch (Exception $e) {
+                // setHandles kann ohne Trade ausreichen.
+            }
+        }
 
         return ['success' => true];
     } catch (Exception $e) {
@@ -752,8 +827,9 @@ function resellerinterface_Sync(array $params): array
             'active' => strtoupper((string) ($details['state'] ?? '')) === 'ACTIVE',
         ];
 
-        if (!empty($details['cancellationDate'])) {
-            $result['expirydate'] = $details['cancellationDate'];
+        $expiry = resellerinterface_resolveExpiry($client, $domain, $details);
+        if ($expiry) {
+            $result['expirydate'] = $expiry;
         }
 
         return $result;
@@ -779,7 +855,7 @@ function resellerinterface_TransferSync(array $params): array
         if ($state === 'ACTIVE') {
             return [
                 'completed' => true,
-                'expirydate' => $details['cancellationDate'] ?? null,
+                'expirydate' => resellerinterface_resolveExpiry($client, $domain, $details),
             ];
         }
 
@@ -799,3 +875,6 @@ function resellerinterface_TransferSync(array $params): array
         return ['error' => $e->getMessage()];
     }
 }
+
+require_once __DIR__ . '/extras.php';
+

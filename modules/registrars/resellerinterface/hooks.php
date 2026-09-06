@@ -39,7 +39,10 @@ add_hook('AdminAreaPage', 1, function (array $vars): void {
     }
 
     $params = ModuleConfig::getParamsFromRequest($_POST);
-    echo json_encode(resellerinterface_TestConnection($params));
+    echo json_encode(
+        resellerinterface_TestConnection($params),
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
     exit;
 });
 
@@ -51,16 +54,57 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars): string {
     return <<<'HTML'
 <script>
 jQuery(function ($) {
-    var fieldNames = [
-        'Username',
-        'fields[Username]',
-        'fields[resellerinterface][Username]',
-        'resellerinterface_Username'
-    ];
+    function findModuleScope() {
+        var $marker = $('#ri-config-root');
+        var $start = $marker.closest('tr');
+        var $end = $('#ri-test-wrap').closest('tr');
+        if ($start.length && $end.length && $start.parent()[0] === $end.parent()[0]) {
+            var $rows = $();
+            $start.nextAll('tr').addBack().each(function () {
+                $rows = $rows.add(this);
+                if (this === $end[0]) {
+                    return false;
+                }
+            });
+            if ($rows.length) {
+                return $rows;
+            }
+        }
 
-    function findUsernameInput() {
-        for (var i = 0; i < fieldNames.length; i++) {
-            var $el = $('input[name="' + fieldNames[i] + '"]');
+        if ($marker.length) {
+            var $scope = $marker.closest('table, .panel, fieldset');
+            if ($scope.length) {
+                return $scope;
+            }
+        }
+
+        var $hint = $('td, th, label, small, span, p, div').filter(function () {
+            var text = $(this).text();
+            return text.indexOf('/stable/reseller/login') !== -1
+                || text.indexOf('$client->login') !== -1;
+        }).first();
+        if ($hint.length) {
+            return $hint.closest('table, .panel, fieldset');
+        }
+
+        return $();
+    }
+
+    function fieldNames(key) {
+        return [
+            key,
+            'fields[' + key + ']',
+            'fields[resellerinterface][' + key + ']',
+            'resellerinterface_' + key
+        ];
+    }
+
+    function findNamed($root, key) {
+        var names = fieldNames(key);
+        for (var i = 0; i < names.length; i++) {
+            var $el = $root.find(
+                'input[name="' + names[i] + '"], select[name="' + names[i] + '"], textarea[name="' + names[i] + '"]'
+            );
             if ($el.length) {
                 return $el.first();
             }
@@ -68,36 +112,40 @@ jQuery(function ($) {
         return $();
     }
 
-    var $username = findUsernameInput();
-    if (!$username.length) {
+    function findField($scope, key) {
+        if (key === 'Username') {
+            var $local = findNamed($('#ri-config-root').closest('td, .fieldarea, .form-group, tr'), key);
+            if ($local.length) {
+                return $local;
+            }
+        }
+        return findNamed($scope, key);
+    }
+
+    var $scope = findModuleScope();
+    if (!$scope.length) {
         return;
     }
 
-    if (!$('#ri-test-connection').length) {
-        var $wrap = $(
+    if (!$scope.find('#ri-test-connection').length) {
+        $scope.append(
             '<div id="ri-test-wrap" style="margin:15px 0;">' +
                 '<button type="button" class="btn btn-default" id="ri-test-connection">' +
                     '<i class="fas fa-plug"></i> Verbindung testen</button>' +
                 '<div id="ri-test-result" style="margin-top:10px;display:none;"></div>' +
             '</div>'
         );
-        var $save = $('input[value="Save Changes"], button:contains("Save Changes"), input[value="Änderungen speichern"], button:contains("Änderungen speichern")').filter(':visible').last();
-        if ($save.length) {
-            $save.after($wrap);
-        } else {
-            $username.closest('form, table, .panel, div').first().append($wrap);
-        }
     }
 
-    var $btn = $('#ri-test-connection');
-    var $result = $('#ri-test-result');
+    var $btn = $scope.find('#ri-test-connection').first();
+    var $result = $scope.find('#ri-test-result').first();
     if (!$result.length) {
         $result = $('<div id="ri-test-result" style="margin-top:10px;display:none;"></div>');
         $btn.after($result);
     }
 
     $btn.off('click.riTest').on('click.riTest', function () {
-        var $form = $username.closest('form');
+        var $form = $scope.closest('form');
         var token = '';
         if ($form.length) {
             token = $form.find('input[name="token"]').val() || '';
@@ -112,15 +160,11 @@ jQuery(function ($) {
         };
 
         var known = [
-            'Username', 'Password', 'TotpCode', 'ApiUrl', 'ApiPrefix',
+            'Username', 'Password', 'TotpCode',
             'ResellerId', 'DefaultHandleTag', 'DefaultRedirectMode', 'DebugMode'
         ];
-        var $scope = $username.closest('table, .panel, fieldset, form');
         $.each(known, function (_, key) {
-            var $field = $scope.find(
-                'input[name="' + key + '"], select[name="' + key + '"], textarea[name="' + key + '"],' +
-                'input[name="fields[' + key + ']"], select[name="fields[' + key + ']"]'
-            ).first();
+            var $field = findField($scope, key);
             if (!$field.length) {
                 return;
             }
@@ -128,7 +172,11 @@ jQuery(function ($) {
                 postData['ri_' + key] = $field.is(':checked') ? ($field.val() || 'on') : '';
                 return;
             }
-            postData['ri_' + key] = $field.val();
+            var value = $field.val();
+            if ((key === 'Password' || key === 'TotpCode') && (!value || /^[\.●•*]+$/.test(value))) {
+                return;
+            }
+            postData['ri_' + key] = value;
         });
 
         $btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Teste Verbindung...');

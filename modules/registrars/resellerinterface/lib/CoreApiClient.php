@@ -34,25 +34,8 @@ class CoreApiClient
     {
         $this->params = $params;
         $this->debug = !empty($params['DebugMode']);
-
-        $baseUrl = trim((string) ($params['ApiUrl'] ?? self::DEFAULT_API_URL));
-        if ($baseUrl === '' || !self::isAllowedApiHost($baseUrl)) {
-            $baseUrl = self::DEFAULT_API_URL;
-        }
-        $baseUrl = rtrim($baseUrl, '/') . '/';
-
-        $version = trim((string) ($params['ApiPrefix'] ?? self::DEFAULT_API_PREFIX), '/');
-        if ($version === '') {
-            $version = self::DEFAULT_API_PREFIX;
-        }
-
-        if (preg_match('#/(stable|latest|dev|v\d+)/?$#', $baseUrl, $matches)) {
-            $version = $matches[1];
-            $baseUrl = preg_replace('#/(stable|latest|dev|v\d+)/?$#', '/', $baseUrl) ?: $baseUrl;
-        }
-
-        $this->baseUrl = $baseUrl;
-        $this->version = $version;
+        $this->baseUrl = self::DEFAULT_API_URL;
+        $this->version = self::DEFAULT_API_PREFIX;
     }
 
     /**
@@ -90,25 +73,25 @@ class CoreApiClient
         }
 
         $username = trim((string) ($this->params['Username'] ?? ''));
-        $password = (string) ($this->params['Password'] ?? '');
-        $resellerId = trim((string) ($this->params['ResellerId'] ?? ''));
+        $password = html_entity_decode(
+            (string) ($this->params['Password'] ?? ''),
+            ENT_QUOTES | ENT_HTML5,
+            'UTF-8'
+        );
+        $resellerId = preg_replace('/\D+/', '', (string) ($this->params['ResellerId'] ?? '')) ?? '';
 
         if ($username === '' || $password === '') {
             throw new Exception('API-Benutzername oder Passwort fehlt in der Modulkonfiguration.');
         }
 
-        if ($resellerId === '') {
-            throw new Exception(
-                'Reseller-ID fehlt. Der Login erwartet username, password und resellerId '
-                . '(siehe CoreAPI: $client->login("username", "password", 23456)).'
-            );
-        }
-
         $loginData = [
             'username' => $username,
             'password' => $password,
-            'resellerId' => $resellerId,
         ];
+
+        if ($resellerId !== '') {
+            $loginData['resellerId'] = $resellerId;
+        }
 
         if (!empty($this->params['TotpCode'])) {
             $loginData['totp'] = $this->params['TotpCode'];
@@ -131,7 +114,7 @@ class CoreApiClient
     {
         $action = trim($endpoint, '/');
         $url = $this->baseUrl . $this->version . '/' . $action;
-        $postFields = $this->buildPostArray($data);
+        $postFields = $this->buildFormBody($data);
 
         $responseHeaders = '';
         $ch = curl_init();
@@ -145,6 +128,9 @@ class CoreApiClient
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
         curl_setopt($ch, CURLOPT_ENCODING, '');
         curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: application/x-www-form-urlencoded',
+        ]);
         curl_setopt($ch, CURLOPT_USERAGENT, 'api-client-php/1.0.6 php/' . PHP_VERSION);
         curl_setopt($ch, CURLOPT_HEADERFUNCTION, static function ($client, $headerLine) use (&$responseHeaders) {
             $responseHeaders .= $headerLine;
@@ -174,7 +160,7 @@ class CoreApiClient
             logModuleCall(
                 'resellerinterface',
                 $action,
-                ['url' => $url, 'effectiveUrl' => $effectiveUrl, 'fields' => array_keys($postFields)],
+                ['url' => $url, 'effectiveUrl' => $effectiveUrl, 'fields' => array_keys($data)],
                 'HTTP ' . $httpCode . "\n" . $responseHeaders . "\n" . $response,
                 null,
                 [$this->params['Password'] ?? '', self::$sessionId ?? '']
@@ -200,20 +186,6 @@ class CoreApiClient
         }
 
         return $decoded;
-    }
-
-    /**
-     * Only ResellerInterface CoreAPI hosts are accepted.
-     */
-    public static function isAllowedApiHost(string $url): bool
-    {
-        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
-
-        return in_array($host, [
-            'core.resellerinterface.de',
-            'core.do.de',
-            'core.domainreselling.de',
-        ], true);
     }
 
     /**
@@ -246,6 +218,38 @@ class CoreApiClient
         }
 
         return $return;
+    }
+
+    /**
+     * Same encoding as the working CoreAPI curl example (--data-raw):
+     * leave "!" unencoded. PHP http_build_query would send %21 and the API
+     * then rejects the password.
+     *
+     * @param array $data
+     * @return string
+     */
+    private function buildFormBody(array $data): string
+    {
+        $parts = [];
+
+        foreach ($this->buildPostArray($data) as $key => $value) {
+            $encodedKey = strtr(rawurlencode((string) $key), [
+                '%5B' => '[',
+                '%5D' => ']',
+            ]);
+            $encodedValue = strtr((string) $value, [
+                '%' => '%25',
+                '&' => '%26',
+                '=' => '%3D',
+                '+' => '%2B',
+                "\n" => '%0A',
+                "\r" => '%0D',
+                ' ' => '+',
+            ]);
+            $parts[] = $encodedKey . '=' . $encodedValue;
+        }
+
+        return implode('&', $parts);
     }
 
     /**
