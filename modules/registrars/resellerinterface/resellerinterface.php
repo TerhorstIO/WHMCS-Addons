@@ -98,6 +98,62 @@ function resellerinterface_resolveExpiry($client, string $domain, array $details
 }
 
 /**
+ * domain/details enthält die Transfersperre oft nicht.
+ * Fallback: domain/list inkl. settings.
+ *
+ * @param \WHMCS\Module\Registrar\Resellerinterface\CoreApiClient $client
+ * @param string $domain
+ * @return array<string, mixed>
+ */
+function resellerinterface_domainDetails($client, string $domain): array
+{
+    try {
+        $response = $client->request('domain/details', [
+            'domain' => $domain,
+            'include' => ['settings'],
+        ]);
+    } catch (Exception $e) {
+        $response = $client->request('domain/details', ['domain' => $domain]);
+    }
+    $details = (array) ($response['domain'] ?? []);
+    foreach (['status', 'settings', 'locks', 'flags'] as $extraKey) {
+        if (isset($response[$extraKey]) && !isset($details[$extraKey])) {
+            $details[$extraKey] = $response[$extraKey];
+        }
+    }
+
+    if (DomainHelper::extractTransferLock($details) !== null) {
+        return $details;
+    }
+
+    $parts = explode('.', $domain);
+    $tld = (string) array_pop($parts);
+    $sld = implode('.', $parts);
+
+    try {
+        $listed = $client->request('domain/list', [
+            'filter' => [
+                'sld' => $sld,
+                'tld' => $tld,
+            ],
+            'include' => ['settings'],
+            'limit' => 5,
+        ]);
+        foreach ((array) ($listed['list'] ?? []) as $item) {
+            if (!is_array($item) || strcasecmp((string) ($item['domain'] ?? ''), $domain) !== 0) {
+                continue;
+            }
+
+            return $item + $details;
+        }
+    } catch (Exception $e) {
+        // details ohne Lock-Feld weiterverwenden
+    }
+
+    return $details;
+}
+
+/**
  * @return array<string, mixed>
  */
 function resellerinterface_MetaData(): array
@@ -388,8 +444,7 @@ function resellerinterface_GetDomainInformation(array $params)
     try {
         $client = resellerinterface_client($params);
         $domain = DomainHelper::getDomainName($params);
-        $response = $client->request('domain/details', ['domain' => $domain]);
-        $details = $response['domain'] ?? [];
+        $details = resellerinterface_domainDetails($client, $domain);
         $nameservers = DomainHelper::extractNameservers($details);
 
         $status = Domain::STATUS_ACTIVE;
@@ -407,9 +462,7 @@ function resellerinterface_GetDomainInformation(array $params)
             ->setRegistrationStatus($status);
 
         $lock = DomainHelper::extractTransferLock($details);
-        if ($lock !== null) {
-            $domainObj->setTransferLock($lock);
-        }
+        $domainObj->setTransferLock($lock === true);
 
         $expiry = resellerinterface_resolveExpiry($client, $domain, $details);
         if ($expiry) {
@@ -538,15 +591,34 @@ function resellerinterface_GetRegistrarLock(array $params)
     try {
         $client = resellerinterface_client($params);
         $domain = DomainHelper::getDomainName($params);
-        $response = $client->request('domain/details', ['domain' => $domain]);
-        $details = $response['domain'] ?? [];
-
+        $details = resellerinterface_domainDetails($client, $domain);
         $lock = DomainHelper::extractTransferLock($details);
+
         if ($lock === null) {
-            return 'unlocked';
+            try {
+                $safe = $client->request('domain/getDomainSafeDetails', ['domain' => $domain]);
+                if (DomainHelper::toBool($safe['active'] ?? false)) {
+                    $lock = true;
+                }
+            } catch (Exception $e) {
+                // Domain-Safe ist optional
+            }
         }
 
-        return $lock ? 'locked' : 'unlocked';
+        if (function_exists('logModuleCall')) {
+            logModuleCall(
+                'resellerinterface',
+                'GetRegistrarLock',
+                [
+                    'domain' => $domain,
+                    'keys' => array_keys($details),
+                    'lockHints' => DomainHelper::collectLockHints($details),
+                ],
+                $lock === true ? 'locked' : 'unlocked'
+            );
+        }
+
+        return $lock === true ? 'locked' : 'unlocked';
     } catch (Exception $e) {
         return ['error' => $e->getMessage()];
     }
@@ -561,11 +633,20 @@ function resellerinterface_SaveRegistrarLock(array $params): array
     try {
         $client = resellerinterface_client($params);
         $domain = DomainHelper::getDomainName($params);
-        $lockEnabled = ($params['lockenabled'] ?? '') === 'locked';
+        $requested = strtolower(trim((string) ($params['lockenabled'] ?? '')));
+        $lockEnabled = in_array($requested, ['locked', 'on', '1', 'true', 'yes'], true);
 
+        $details = [];
+        try {
+            $details = resellerinterface_domainDetails($client, $domain);
+        } catch (Exception $e) {
+            $details = [];
+        }
+
+        $apiDomain = $details['domainID'] ?? $domain;
         $client->request('domain/setStatus', [
-            'domain' => $domain,
-            'transferLock' => $lockEnabled,
+            'domain' => $apiDomain,
+            'transferLock' => $lockEnabled ? 1 : 0,
         ]);
 
         return ['success' => true];

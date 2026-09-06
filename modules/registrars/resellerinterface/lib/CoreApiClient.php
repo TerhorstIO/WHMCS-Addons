@@ -207,9 +207,9 @@ class CoreApiClient
             }
 
             if ($value === true) {
-                $value = 'true';
+                $value = '1';
             } elseif ($value === false) {
-                $value = 'false';
+                $value = '0';
             } elseif ($value === null) {
                 continue;
             }

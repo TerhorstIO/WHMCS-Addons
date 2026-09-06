@@ -200,19 +200,45 @@ class DomainHelper
      */
     public static function extractTransferLock(array $domainDetails): ?bool
     {
-        foreach (['transferLock', 'updateLock'] as $field) {
+        $found = self::findTransferLockValue($domainDetails, 0);
+        if ($found !== null) {
+            return $found;
+        }
+
+        foreach (['hasDomainSafe', 'hasRegistryLock', 'domainSafe'] as $field) {
             if (array_key_exists($field, $domainDetails)) {
                 return self::toBool($domainDetails[$field]);
             }
         }
 
-        if (!empty($domainDetails['status']) && is_array($domainDetails['status'])) {
-            if (array_key_exists('transferLock', $domainDetails['status'])) {
-                return self::toBool($domainDetails['status']['transferLock']);
+        return null;
+    }
+
+    /**
+     * Key paths that look like lock flags, for the module log.
+     *
+     * @param array $data
+     * @return array<string, mixed>
+     */
+    public static function collectLockHints(array $data, string $prefix = '', int $depth = 0): array
+    {
+        if ($depth > 5) {
+            return [];
+        }
+
+        $hints = [];
+        foreach ($data as $key => $value) {
+            $path = $prefix === '' ? (string) $key : $prefix . '.' . $key;
+            $name = strtolower((string) $key);
+            if (str_contains($name, 'lock') || str_contains($name, 'hold') || str_contains($name, 'prohibited') || $name === 'status') {
+                $hints[$path] = is_array($value) ? array_keys($value) : $value;
+            }
+            if (is_array($value) && !in_array((string) $key, ['tldInfo', 'tldExotic', 'nameserver', 'handles', 'dnssec', 'hostObjects', 'price'], true)) {
+                $hints += self::collectLockHints($value, $path, $depth + 1);
             }
         }
 
-        return null;
+        return $hints;
     }
 
     /**
@@ -225,7 +251,19 @@ class DomainHelper
             return $value;
         }
 
-        return in_array((string) $value, ['1', 'true', 'yes', 'locked'], true);
+        if (is_int($value) || is_float($value)) {
+            return (int) $value !== 0;
+        }
+
+        return in_array(strtolower(trim((string) $value)), [
+            '1',
+            'true',
+            'yes',
+            'on',
+            'locked',
+            'enabled',
+            'active',
+        ], true);
     }
 
     /**
@@ -265,6 +303,63 @@ class DomainHelper
         }
 
         return $objects;
+    }
+
+    /**
+     * @param array $data
+     * @param int $depth
+     * @return bool|null
+     */
+    private static function findTransferLockValue(array $data, int $depth): ?bool
+    {
+        if ($depth > 4) {
+            return null;
+        }
+
+        foreach (['transferLock', 'TransferLock', 'transfer_lock', 'clientTransferProhibited'] as $field) {
+            if (array_key_exists($field, $data)) {
+                return self::toBool($data[$field]);
+            }
+        }
+
+        if ($depth === 0 && self::hasEppTransferLock($data)) {
+            return true;
+        }
+
+        foreach ($data as $key => $value) {
+            if (!is_array($value) || in_array((string) $key, ['tldInfo', 'tldExotic', 'nameserver', 'handles', 'dnssec', 'hostObjects', 'restorable', 'price'], true)) {
+                continue;
+            }
+
+            $found = self::findTransferLockValue($value, $depth + 1);
+            if ($found !== null) {
+                return $found;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array $data
+     * @return bool
+     */
+    private static function hasEppTransferLock(array $data): bool
+    {
+        $statuses = $data['eppStatus'] ?? $data['statuses'] ?? $data['status'] ?? null;
+        if (!is_array($statuses)) {
+            return false;
+        }
+
+        $flat = [];
+        array_walk_recursive($statuses, static function ($value) use (&$flat): void {
+            if (is_string($value) || is_int($value)) {
+                $flat[] = strtolower((string) $value);
+            }
+        });
+
+        return in_array('clienttransferprohibited', $flat, true)
+            || in_array('servertransferprohibited', $flat, true);
     }
 
     /**
